@@ -1,11 +1,10 @@
 import { InMemorySigner } from "@taquito/signer";
-import { MichelsonMap, TezosToolkit } from "@taquito/taquito";
+import { MichelsonMap, TezosToolkit} from "@taquito/taquito";
 import { buf2hex } from "@taquito/utils";
 import chalk from "chalk";
 import { Spinner } from "cli-spinner";
 import * as dotenv from "dotenv";
-import code from "../compiled/shifumi.json";
-import metadata from "./metadata.json";
+import code from "../compiled/market.json";
 
 dotenv.config({ path: __dirname + "/.env" });
 
@@ -65,15 +64,22 @@ const Tezos = new TezosToolkit(rpcUrl);
 const signer = new InMemorySigner(pk);
 Tezos.setProvider({ signer: signer });
 
-async function deploy() {
-  let storage = {
-    metadata: MichelsonMap.fromLiteral({
-      "": buf2hex(Buffer.from("tezos-storage:contents")),
-      contents: buf2hex(Buffer.from(JSON.stringify(metadata))),
-    }),
-    next_session: 0,
-    sessions: new MichelsonMap(),
-  };
+  async function deploy() {
+    let storage = {
+      metadata: MichelsonMap.fromLiteral({
+        '':
+        buf2hex(Buffer.from("ipfs://QmRhaKzkHXRWvAtW8mxEmztHywdn2oQ9TApxQ4Yq2BqdPN")),
+      }),
+      next_id: 0,
+      swaps: new MichelsonMap(),
+      fa2s: [],
+      currencies: new MichelsonMap(),
+      admin: 'tz1dZTjhDDhFcVGiXY1WmGuDSrstRNW9Hna4',
+      pending_admin: null,
+      fee: 25,
+      paused: false,
+  
+    };
 
   try {
     const origination = await makeSpinnerOperation(

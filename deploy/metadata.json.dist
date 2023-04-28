@@ -1,17 +1,17 @@
 {
-    "name": "Shifumi Example",
-    "description": "An Example Shifumi Contract",
+    "name": "Market Test",
+    "description": "step by step",
     "version": "beta",
     "license": {
         "name": "MIT"
     },
     "authors": [
-        "smart-chain <tezos@smart-chain.fr>"
+        "tezosmiami <tezosmiami@gmail.com>"
     ],
-    "homepage": "https://github.com/ligolang/shifumi-jsligo",
+    "homepage": "",
     "source": {
-        "tools": "jsligo",
-        "location": "https://github.com/ligolang/shifumi-jsligo/contracts"
+        "tools": "cameligo",
+        "location": ""
     },
     "interfaces": [
         "TZIP-016"

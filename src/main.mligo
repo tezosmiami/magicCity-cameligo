@@ -1,114 +1,216 @@
-#import "storage.mligo" "Storage"
-#import "parameter.mligo" "Parameter"
-#import "views.mligo" "Views"
 #import "errors.mligo" "Errors"
-#import "session.mligo" "Session"
-#import "conditions.mligo" "Conditions"
+#import "swaps.mligo" "Swaps"
+#import "admin.mligo" "Admin"
+#import "transfer.mligo" "Transfer"
+#import "storage.mligo" "Storage"
+
+type currency_param = Storage.currency_param
+type update_currency = Storage.update_currency
 
 type storage = Storage.t
-type parameter = Parameter.t
+
+type parameter = 
+    | Swap of Swaps.t
+    | Unswap of nat
+    | Collect of nat
+    | Update_fa2s of address
+    | Update_fee of nat
+    | Update_currencies of update_currency
+    | Set_admin of address
+    | Confirm_admin  
+    | Pause of bool
+
 type return = operation list * storage
 
-// Anyone can create a session (must specify players and number of rounds)
-let createSession(param, store : Parameter.createsession_param * Storage.t) : operation list * Storage.t =
-    let new_session : Session.t = Session.new param.total_rounds param.players in
-    let new_storage : Storage.t = {store with next_session=store.next_session + 1n; sessions=Map.add store.next_session new_session store.sessions} in
-    (([]: operation list), new_storage)
-
-// search for a non troller in the session
-let find_me_a_name(sessionId, missing_players, current_session, store :nat * Session.player set * Session.t * Storage.t) : operation list * Storage.t =
-    let rem_player(acc, elt : address set * address ) : address set = Set.remove elt acc in
-    let winners_set : address set = Set.fold rem_player missing_players current_session.players in
-    let _check_has_winner : unit = assert_with_error (Set.cardinal winners_set > 0n) Errors.no_winner in
-    let add_player(acc, elt : address list * address) : address list = elt :: acc in
-    let winners_list : address list = Set.fold add_player winners_set ([] : address list) in
-    let winner : address = Option.unopt (List.head_opt winners_list) in
-    let new_current_session : Session.t = { current_session with result=Winner(winner) } in
-    let new_storage : Storage.t = Storage.update_sessions store sessionId new_current_session in
-    (([]: operation list), new_storage )
-
-// allow players to claim victory if opponent is a troller (refuse to play)
-let stopSession(param, store : Parameter.stopsession_param * Storage.t) : operation list * Storage.t =
-    let current_session : Session.t = Storage.getSession(param.sessionId, store) in
-    let _check_players : unit = Conditions.check_player_authorized (Tezos.get_sender ()) current_session.players Errors.user_not_allowed_to_stop_session in
-    let _check_session_end : unit = Conditions.check_session_end current_session.result Inplay in
-    let _check_asleep : unit = Conditions.check_asleep(current_session) in
-    let current_round = match Map.find_opt current_session.current_round current_session.rounds with
-    | None -> ([] : Session.player_actions)
-    | Some rnd -> rnd
+let swap(param, store : Swaps.t * Storage.t) : return =
+    let _fail_if_paused : unit = Admin.fail_if_paused(store) in
+    let _fail_if_tez : unit = if Tezos.get_amount() > 0tz then failwith(Errors.includes_tez) in 
+    let _check_fa2 : unit = assert_with_error (Set.mem param.fa2 store.fa2s) Errors.false_fa2 in
+    let currency : currency_param =
+    match Map.find_opt param.currency store.currencies with 
+    | None -> failwith(Errors.false_currency)
+    | Some (currency) -> currency
     in
-    let missing_players = Session.find_missing(current_round, current_session.players) in
-    if Set.cardinal missing_players > 0n then
-        find_me_a_name (param.sessionId, missing_players, current_session, store)
-    else
-        let current_decoded_round = match Map.find_opt current_session.current_round current_session.decoded_rounds with
-        | None -> (failwith("SHOULD NOT BE HERE SESSION IS BROKEN") : Session.decoded_player_actions)
-        | Some rnd -> rnd
-        in
-        let missing_players_for_reveal = Session.find_missing(current_decoded_round, current_session.players) in
-        if Set.cardinal missing_players_for_reveal > 0n then
-            find_me_a_name (param.sessionId, missing_players_for_reveal, current_session, store)
+    let _check_swap_amount : unit = assert_with_error (param.amount > 0n) Errors.false_amount in
+    let _check_price : unit = assert_with_error (param.price > currency.min) Errors.false_price in
+    let _check_royalties : unit = assert_with_error (param.royalties <= 250n) Errors.false_royalties in
+    let transfer : Transfer.t = {from_ = Tezos.get_sender(); txs = [{to_= Tezos.get_self_address(); amount = param.amount; token_id = param.token_id}]} in
+    let op = Transfer.fa2_transfer (param.fa2, transfer) in
+    let new_storage : Storage.t = {
+        store with swaps = Big_map.update store.next_id (Some(param)) store.swaps;
+        next_id=store.next_id + 1n;
+    } in
+    let event : operation  = Tezos.emit "%swap_event" param in
+    event :: [op], new_storage
+
+let unswap(swap_id, store : nat * Storage.t) : return =
+    let _fail_if_tez : unit = if Tezos.get_amount() > 0tz then failwith(Errors.includes_tez) in 
+    let sender = Tezos.get_sender() in 
+    let swap : Swaps.t =
+    match Big_map.find_opt swap_id store.swaps with 
+    | None -> failwith(Errors.false_swap)
+    | Some (swap) -> swap
+    in
+    let _check_swap_amount : unit = assert_with_error (swap.amount > 0n) Errors.zero_swap in
+    let _check_issuer : unit = assert_with_error (sender = swap.issuer) Errors.false_issuer in
+    let transfer : Transfer.t = {from_ = Tezos.get_self_address(); txs = [{to_= sender; amount = swap.amount; token_id = swap.token_id}]} in
+    let op = Transfer.fa2_transfer (swap.fa2,transfer) in
+    let swap : Swaps.t = {swap with amount = abs(swap.amount - 1n)} in
+    let new_storage : Storage.t = {store with swaps = Big_map.update swap_id (Some(swap)) store.swaps} in
+    let event : operation = Tezos.emit "%unswap_event" swap_id in
+    event :: [op], new_storage
+
+let collect(swap_id, store : nat * Storage.t) : return =
+    let _fail_if_paused : unit = Admin.fail_if_paused(store) in
+    let _fail_if_tez : unit = if Tezos.get_amount() > 0tz then failwith(Errors.includes_tez) in 
+    let swap : Swaps.t =
+    match Big_map.find_opt swap_id store.swaps with 
+    | None -> failwith(Errors.false_swap)
+    | Some (swap) -> swap
+    in
+    let _check_swap_amount : unit = assert_with_error (swap.amount > 0n) Errors.zero_swap in
+    let currency : Storage.currency_param =
+    match Map.find_opt swap.currency store.currencies with 
+    | None -> failwith(Errors.false_currency)
+    | Some (c) -> c
+    in
+    let sender = Tezos.get_sender() in
+    let royalties : nat = (swap.price * swap.royalties)/1000n in
+    let fee : nat = (swap.price * store.fee)/1000n in
+    let ops: operation list  =
+        if (currency.is_fa2) then 
+            [Transfer.fa2_transfer
+            (swap.currency, 
+            {from_ = sender;
+             txs = [{to_= swap.issuer;
+             amount = abs(swap.price - (royalties+fee));
+            token_id = currency.token_id}]});
+            Transfer.fa2_transfer
+            (swap.currency, 
+            {from_ = sender;
+             txs = [{to_= swap.creator;
+             amount = royalties;
+            token_id = currency.token_id}]});
+            Transfer.fa2_transfer
+            (swap.currency,
+            {from_ = sender;
+             txs = [{to_= store.admin;
+             amount = fee;
+            token_id = currency.token_id}]})
+            ] 
         else
-            (([]: operation list), store )
+            [Transfer.fa12_transfer
+                (swap.currency,
+                {from = sender;
+                to_= swap.issuer;
+                value = abs(swap.price - (royalties+fee))});
+                Transfer.fa12_transfer
+                (swap.currency,
+                {from = sender;
+                to_= swap.creator;
+                value = royalties}); 
+                Transfer.fa12_transfer
+                (swap.currency,
+                {from = sender;
+                to_= store.admin;
+                value = fee})
+            ] 
+            in
+    let transfer : Transfer.t = {from_ = Tezos.get_self_address(); txs = [{to_= sender; amount = 1n; token_id = swap.token_id}]} in
+    let ops : operation list = Transfer.fa2_transfer (swap.fa2,transfer) :: ops in
+    let swap : Swaps.t = {swap with amount = abs(swap.amount - 1n)} in
+    let new_storage : Storage.t = {store with swaps =
+    Big_map.update swap_id (Some(swap)) store.swaps} in
+    let event : operation = Tezos.emit "%collect_event" {sender; swap_id} in
+    event :: ops, new_storage
 
+let update_fee (new_fee, store : nat *  Storage.t) : return =
+    let _fail_if_tez : unit = if Tezos.get_amount() > 0tz then failwith(Errors.includes_tez) in 
+    let _is_admin : unit = Admin.fail_if_not_admin(store) in 
+    let _check_fee : unit = assert_with_error (new_fee < 250n) Errors.false_fa2 in
+    let new_storage : Storage.t = {store with fee = new_fee} in
+    let event : operation = Tezos.emit "%update_fee_event" new_fee in
+    [event], new_storage
 
-// the player create a bytes with the chosen action (Stone | Paper | Cisor) in backend
-// once the bytes is created, the player send its bytes to the smart contract
-let play(param, store : Parameter.play_param * Storage.t) : operation list * Storage.t =
-    let current_session : Session.t = Storage.getSession(param.sessionId, store) in
-    let sender = Tezos.get_sender () in
-    let _check_players : unit = Conditions.check_player_authorized sender current_session.players Errors.user_not_allowed_to_play_in_session in
-    let _check_session_end : unit = Conditions.check_session_end current_session.result Inplay in
-    let _check_round : unit = assert_with_error (current_session.current_round = param.roundId) Errors.wrong_current_round in
-    // register action
-    let new_rounds = Session.add_in_rounds current_session.current_round current_session sender param.action in
+let update_fa2s(contract, store : address *  Storage.t) : return =
+    let _fail_if_tez : unit = if Tezos.get_amount() > 0tz then failwith(Errors.includes_tez) in 
+    let _is_admin : unit = Admin.fail_if_not_admin(store) in 
+    let exists : bool = Set.mem contract store.fa2s in
+    let new_storage : Storage.t = { store with fa2s = 
+        if exists then Set.remove contract store.fa2s 
+          else Set.add contract store.fa2s } in
+    let event : operation = Tezos.emit "%update_fa2s_event" contract in
+    [event], new_storage
 
-    let new_session : Session.t = Session.update_rounds current_session new_rounds in
-    let new_storage : Storage.t = Storage.update_sessions store param.sessionId new_session in
-    (([]: operation list), new_storage)
+let update_currencies(p, store : update_currency * Storage.t) : return =
+    let _fail_if_tez : unit = if Tezos.get_amount() > 0tz then failwith(Errors.includes_tez) in 
+    let _is_admin : unit = Admin.fail_if_not_admin(store) in 
+    let new_storage : Storage.t = match p with
+    | Add_currency (c,d) -> Storage.add_currency(c, d, store)
+    | Remove_currency c -> Storage.remove_currency(c, store)
+        in
+    let event : operation = Tezos.emit "%update_currencies_event" p in
+    [event], new_storage
 
+let set_admin (a, store : address *  Storage.t) : return = 
+    let _fail_if_tez : unit = if Tezos.get_amount() > 0tz then failwith(Errors.includes_tez) in 
+    let _is_admin : unit = Admin.fail_if_not_admin(store) in 
+    let new_storage : Storage.t = Admin.set_admin (a, store) in
+    let event : operation = Tezos.emit "%set_admin_event" a in
+    [event], new_storage
 
-// Once all players have committed their bytes, they must reveal the content of their bytes
-let reveal (param, store : Parameter.reveal_param * Storage.t) : operation list * Storage.t =
-    // players can reveal only if all players have sent their bytes
-    let current_session : Session.t = Storage.getSession(param.sessionId, store) in
-    let sender = Tezos.get_sender () in
-    let _check_players : unit = Conditions.check_player_authorized sender current_session.players Errors.user_not_allowed_to_reveal_in_session in
-    let _check_session_end : unit = Conditions.check_session_end current_session.result Inplay in
-    let _check_round : unit = assert_with_error (current_session.current_round = param.roundId) Errors.wrong_current_round in
+let confirm_admin (store : Storage.t) : return = 
+    let _fail_if_tez : unit = if Tezos.get_amount() > 0tz then failwith(Errors.includes_tez) in 
+    let _is_admin : unit = Admin.fail_if_not_admin(store) in 
+    let new_storage : Storage.t = Admin.confirm_new_admin(store) in
+    let event : operation = Tezos.emit "%confirm_admin_event" new_storage.admin in
+    [event], new_storage
 
-    let current_round_actions : Session.player_actions = Session.get_round_actions current_session.current_round current_session in
+let pause(p, store : bool *  Storage.t) : return = 
+    let _fail_if_tez : unit = if Tezos.get_amount() > 0tz then failwith(Errors.includes_tez) in 
+    let _is_admin : unit = Admin.fail_if_not_admin(store) in 
+    let new_storage : Storage.t = Admin.pause (p, store) in
+    let event : operation =  Tezos.emit "%pause_event"  p in
+    [event], new_storage
 
-    let numberOfPlayers : nat = Set.cardinal current_session.players in
-    let listsize (acc, _elt: nat * Session.player_action) : nat = acc + 1n in
-    let numberOfActions : nat = List.fold listsize current_round_actions 0n in
-    let _check_all_players_have_played : unit = assert_with_error (numberOfPlayers = numberOfActions) Errors.missing_player_bytes in
-    // retrieve user bytes (fails if not found)
-    let user_bytes : bytes = Session.get_bytes_exn sender (Some(current_round_actions)) in
-    // decode action
-    let decoded_action : Session.action = Session.decode_bytes_exn param.player_key user_bytes param.player_secret in
-    let new_decoded_rounds = Session.add_in_decoded_rounds current_session.current_round current_session sender decoded_action in
-    let new_current_session : Session.t = Session.update_decoded_rounds current_session new_decoded_rounds in
-
-    // compute board if all players have revealed
-    let modified_new_current_session : Session.t = Session.finalize_current_round new_current_session in
-
-    // if session is finished, we can compute the result winner
-    let final_current_session = Session.finalize_session modified_new_current_session in
-
-    let new_storage : Storage.t = Storage.update_sessions store param.sessionId final_current_session in
-    (([]: operation list), new_storage)
-
-
+    
 let main (ep : parameter) (store : storage) : return =
     match ep with
-    | CreateSession(p) -> createSession(p, store)
-    | Play(p) -> play(p, store)
-    | RevealPlay (r) -> reveal(r, store)
-    | StopSession (c) -> stopSession(c, store)
+    | Swap(s) -> swap(s, store)
+    | Unswap(u) -> unswap(u, store)
+    | Collect (c) -> collect(c, store)
+    | Update_fa2s(u) -> update_fa2s(u, store)
+    | Update_fee(f) -> update_fee(f, store)
+    | Update_currencies(p) -> update_currencies(p, store)
+    | Set_admin(a) -> set_admin (a, store) 
+    | Confirm_admin(_a) ->  confirm_admin(store) 
+    | Pause(p) -> pause(p, store)
 
 
-[@view] let board(sessionId, store: nat * storage): Views.sessionBoard =
-    match Map.find_opt sessionId store.sessions with
-    | Some (sess) -> Views.retrieve_board(sess)
-    | None -> (failwith("Unknown session") : Views.sessionBoard)
+
+[@view] let view_swap(swap_id, store: nat * storage) : Swaps.t =
+    match Big_map.find_opt swap_id store.swaps with
+    | Some (swap) -> swap
+    | None -> (failwith(Errors.false_swap) : Swaps.t)
+
+
+[@view] let view_is_swap(swap_id, store : nat * storage) : bool =
+      match Big_map.find_opt swap_id store.swaps with
+    | Some (_swap) -> true
+    | None -> false
+
+[@view] let view_admin(_, store : unit * storage) : address =
+    store.admin
+
+[@view] let view_fee(_, store : unit * storage) : nat =
+     store.fee
+
+[@view] let view_is_fa2(contract, store : address * storage) : bool = 
+    Set.mem contract store.fa2s
+
+[@view] let view_is_currency(contract, store : address * storage) : bool = 
+    match Map.find_opt contract store.currencies with
+    | Some(_contract) -> true
+    | None -> false
+
+    //curency min view?

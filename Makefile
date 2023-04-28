@@ -8,23 +8,23 @@ help:
 	@echo  'Usage:'
 	@echo  '  all             - Remove generated Michelson files, recompile smart contracts and lauch all tests'
 	@echo  '  clean           - Remove generated Michelson files'
-	@echo  '  compile         - Compiles smart contract Shifumi'
+	@echo  '  compile         - Compiles smart contract'
 	@echo  '  test            - Run integration tests (written in Ligo)'
-	@echo  '  deploy          - Deploy smart contract Shifumi (typescript using Taquito)'
+	@echo  '  deploy          - Deploy smart contract (typescript using Taquito)'
 	@echo  ''
 
 all: clean compile test
 
-compile: shifumi
+compile: market
 
-shifumi: shifumi.tz shifumi.json
+market: market.tz market.json
 
-shifumi.tz: src/main.mligo
+market.tz: src/main.mligo
 	@echo "Compiling smart contract to Michelson"
 	@mkdir -p compiled
 	@$(ligo_compiler) compile contract $^ -e main $(protocol_opt) > compiled/$@
 
-shifumi.json: src/main.mligo
+market.json: src/main.mligo
 	@echo "Compiling smart contract to Michelson in JSON format"
 	@mkdir -p compiled
 	@$(ligo_compiler) compile contract $^ $(JSON_OPT) -e main $(protocol_opt) > compiled/$@
